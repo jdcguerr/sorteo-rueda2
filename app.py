@@ -1,92 +1,83 @@
 import streamlit as st
 import random
 import time
+from google.cloud import firestore
+from google.oauth2 import service_account
+import json
 
-# --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="Sorteo Validado", page_icon="🔒")
+# --- CONFIGURACIÓN DE FIRESTORE ---
+# Debes subir las credenciales a Streamlit Secrets (explicado abajo)
+if "textkey" in st.secrets:
+    key_dict = json.loads(st.secrets["textkey"])
+    creds = service_account.Credentials.from_service_account_info(key_dict)
+    db = firestore.Client(credentials=creds, project="tu-proyecto-id")
+else:
+    st.error("Error de configuración de base de datos.")
+    st.stop()
 
-# --- DATOS MAESTROS ---
-USUARIOS_PERMITIDOS = [
-    "Johanna", "Ana", "Vanessa", "Carlota", "Olga", 
-    "Norma", "Irene", "Charles", "Teresa", "Lourdes", 
-    "Lourdes2", "Jenny", "Elke", "Jhanneth", "Olga2"
-]
+# Referencia al documento único del sorteo
+doc_ref = db.collection("sorteos").document("general")
 
-MESES_INICIALES = [
-    "Abril", "Mayo", "Junio", "Julio", "Agosto", 
-    "Septiembre", "Octubre", "Noviembre", "Diciembre", 
-    "Enero", "Febrero", "Marzo", "Abril2", "Mayo2", "Junio2"
-]
-
-# --- INICIALIZACIÓN DEL ESTADO ---
-if 'datos_ruleta' not in st.session_state:
-    st.session_state.datos_ruleta = MESES_INICIALES.copy()
-
-if 'resultados' not in st.session_state:
-    st.session_state.resultados = {}  # Formato: {"Nombre": "Mes"}
+# --- FUNCIONES DE SINCRONIZACIÓN ---
+def obtener_estado():
+    doc = doc_ref.get()
+    if doc.exists:
+        return doc.to_dict()
+    else:
+        # Estado inicial si la base de datos está vacía
+        estado_inicial = {
+            "datos_ruleta": ["Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre", "Enero", "Febrero", "Marzo", "Abril2", "Mayo2", "Junio2"],
+            "resultados": {},
+            "usuarios_permitidos": ["Johanna", "Ana", "Vanessa", "Carlota", "Olga", "Norma", "Irene", "Charles", "Teresa", "Lourdes", "Lourdes2", "Jenny", "Elke", "Jhanneth", "Olga2"]
+        }
+        doc_ref.set(estado_inicial)
+        return estado_inicial
 
 # --- INTERFAZ ---
-st.title("🎡 Rueda de Asignación con Validación")
-st.write("Ingrese su nombre para realizar su lanzamiento único.")
+st.title("🎡 Sorteo Sincronizado en Tiempo Real")
+estado = obtener_estado()
 
-# Campo de entrada para validación
-nombre_usuario = st.text_input("Escriba su nombre exactamente como está registrado:").strip()
+nombre_usuario = st.text_input("Ingrese su nombre para participar:").strip()
 
-if st.button("🎰 REALIZAR LANZAMIENTO"):
-    if not nombre_usuario:
-        st.warning("Por favor, ingrese un nombre.")
+if st.button("🎰 GIRAR RUEDA"):
+    # Recargar estado para evitar conflictos
+    estado = obtener_estado()
     
-    # 1. Validar si el usuario existe en la lista
-    elif nombre_usuario not in USUARIOS_PERMITIDOS:
+    if nombre_usuario not in estado["usuarios_permitidos"]:
         st.error("❌ Usuario no existe")
-    
-    # 2. Validar si el usuario ya realizó su lanzamiento
-    elif nombre_usuario in st.session_state.resultados:
-        st.warning(f"⚠️ El usuario '{nombre_usuario}' ya realizó el lanzamiento.")
-        st.info(f"Tu resultado fue: {st.session_state.resultados[nombre_usuario]}")
-    
-    # 3. Realizar el lanzamiento si todo es correcto
+    elif nombre_usuario in estado["resultados"]:
+        st.warning(f"⚠️ {nombre_usuario}, ya realizaste tu lanzamiento.")
+        st.info(f"Tu resultado fue: {estado['resultados'][nombre_usuario]}")
+    elif len(estado["datos_ruleta"]) == 0:
+        st.error("Ya no quedan meses en la rueda.")
     else:
-        if len(st.session_state.datos_ruleta) > 0:
-            with st.spinner("Girando la rueda..."):
-                time.sleep(1.5)
-                seleccion = random.choice(st.session_state.datos_ruleta)
-                
-                # Guardar resultado y eliminar de la rueda
-                st.session_state.resultados[nombre_usuario] = seleccion
-                st.session_state.datos_ruleta.remove(seleccion)
-                
-                st.success(f"¡Excelente {nombre_usuario}! Tu mes asignado es: {seleccion}")
-        else:
-            st.error("La rueda está vacía. Todos los meses han sido asignados.")
+        with st.spinner("Girando para todos los participantes..."):
+            time.sleep(1)
+            seleccion = random.choice(estado["datos_ruleta"])
+            
+            # ACTUALIZAR EN LA NUBE
+            estado["resultados"][nombre_usuario] = seleccion
+            estado["datos_ruleta"].remove(seleccion)
+            doc_ref.update({
+                "resultados": estado["resultados"],
+                "datos_ruleta": estado["datos_ruleta"]
+            })
+            
+            st.success(f"¡{nombre_usuario}, has obtenido: {seleccion}!")
+            st.balloons()
 
-# --- SECCIÓN DE RESULTADOS ACUMULADOS ---
+# --- VISUALIZACIÓN UNIFICADA ---
 st.divider()
-st.subheader("📋 Estado del Sorteo")
-
-col1, col2 = st.columns([2, 1])
+col1, col2 = st.columns(2)
 
 with col1:
-    st.write("**Lista de resultados actuales:**")
-    if st.session_state.resultados:
-        for user, mes in st.session_state.resultados.items():
-            st.write(f"✅ {user} → {mes}")
-    else:
-        st.write("Aún no hay lanzamientos registrados.")
+    st.subheader("📋 Resultados Globales")
+    for user, mes in estado["resultados"].items():
+        st.write(f"✅ **{user}**: {mes}")
 
 with col2:
-    st.write("**Meses restantes:**")
-    st.write(len(st.session_state.datos_ruleta))
-    if st.checkbox("Ver meses disponibles"):
-        st.write(st.session_state.datos_ruleta)
+    st.subheader("🎡 Quedan en la rueda")
+    st.write(", ".join(estado["datos_ruleta"]))
 
-# --- CIERRE DEL SORTEO ---
-if len(st.session_state.resultados) == len(USUARIOS_PERMITIDOS):
-    st.balloons()
-    st.success("¡Sorteo finalizado! Todos los usuarios han recibido su mes.")
-    
-    # Botón oculto para reiniciar (opcional, útil para pruebas)
-    if st.button("Reiniciar Sistema"):
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        st.rerun()
+if st.button("🔄 Actualizar Tabla"):
+    st.rerun()
